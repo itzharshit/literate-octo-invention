@@ -21,14 +21,16 @@ TMP_DIR = "/tmp"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "524288"))
+
 if not BOT_TOKEN or not WEBHOOK_URL:
     raise RuntimeError("BOT_TOKEN and WEBHOOK_URL env vars are required!")
 
+# Initialize bot and dispatcher
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 GDRIVE_REGEX = re.compile(
-    r"https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)/(?:[^?]*)(?:\?.*)?"
+    r"https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)"
 )
 GDRIVE_DIRECT = "https://drive.google.com/uc?export=download&id={}"
 
@@ -58,12 +60,20 @@ async def download_file(url: str, dest_path: str, progress_cb=None) -> None:
                     if progress_cb and total:
                         now = asyncio.get_event_loop().time()
                         percent = int(downloaded * 100 / total)
-                        interval = max(0.5, 3.0 - (percent * 0.03))
-                        if now - last_update >= interval or percent != last_percent:
+                        if now - last_update >= 1.0 or percent != last_percent:
                             await progress_cb(percent)
                             last_update = now
                             last_percent = percent
 
+# ✅ Add /start command handler
+@dp.message(F.command("start"))
+async def cmd_start(message: Message):
+    await message.answer(
+        "👋 <b>Welcome to the Downloader Bot!</b>\n\n"
+        "Send me a Google Drive or direct download link and I'll forward it to you as a file."
+    )
+
+# ✅ Handle links
 @dp.message(F.text.startswith("http"))
 async def handle_link(message: Message):
     url = message.text.strip()
@@ -71,22 +81,30 @@ async def handle_link(message: Message):
     if match:
         file_id = match.group(1)
         url = GDRIVE_DIRECT.format(file_id)
+    
     safe_name = hashlib.md5(url.encode()).hexdigest()[:12]
     ext = mimetypes.guess_extension(
         mimetypes.guess_type(url)[0] or "application/octet-stream"
-    )
+    ) or ".bin"
     file_path = os.path.join(TMP_DIR, f"{safe_name}{ext}")
-    progress_msg = await message.reply("Starting download…")
+    
+    progress_msg = await message.reply("📥 Starting download…")
+    
     async def report_progress(percent: int):
         try:
-            await progress_msg.edit_text(f"📥 {percent}%")
+            await progress_msg.edit_text(f"📥 Downloading… {percent}%")
         except TelegramRetryAfter:
             pass
+    
     try:
         await download_file(url, file_path, progress_cb=report_progress)
     except DownloadError as e:
         await progress_msg.edit_text(f"❌ Download failed: {e}")
         return
+    except Exception as e:
+        await progress_msg.edit_text(f"❌ Unexpected error: {str(e)}")
+        return
+    
     await progress_msg.edit_text("📤 Uploading…")
     try:
         await bot.send_chat_action(message.chat.id, "upload_document")
@@ -101,18 +119,23 @@ async def handle_link(message: Message):
             os.remove(file_path)
         except OSError:
             pass
-        await progress_msg.delete()
+        # Optionally keep the progress message or delete it
+        # await progress_msg.delete()
 
+# ✅ Fallback handler
 @dp.message()
 async def fallback(message: Message):
     await message.reply(
-        "Send me a Google Drive or direct download link and I'll forward it to you as a file."
+        "Send me a Google Drive or direct download link and I'll forward it to you as a file.\n\n"
+        "Or use /start to see the welcome message."
     )
 
-WEBHOOK_PATH = f"/bot/{BOT_TOKEN}"
+# Webhook setup
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 FULL_WEBHOOK_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
 
 async def on_startup():
+    log.info("Starting bot...")
     current = await bot.get_webhook_info()
     if current.url != FULL_WEBHOOK_URL:
         try:
@@ -121,22 +144,29 @@ async def on_startup():
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after)
             await bot.set_webhook(FULL_WEBHOOK_URL)
+            log.info("Webhook set after retry to %s", FULL_WEBHOOK_URL)
 
 async def on_shutdown():
+    log.info("Shutting down bot...")
     await bot.delete_webhook()
-    await bot.session.close()
+    # await bot.session.close()  # Usually not needed
 
-dp.startup.register(on_startup)
-dp.shutdown.register(on_shutdown)
+# Register startup/shutdown handlers
+app.add_event_handler("startup", on_startup)
+app.add_event_handler("shutdown", on_shutdown)
 
-@app.post(WEBHOOK_PATH)
+# ✅ Fixed webhook handler - use aiogram's built-in webhook processing
+@app.post(WEBHOOK_PATH, include_in_schema=False)
 async def telegram_webhook(request: Request):
     try:
-        update = await request.json()
-        asyncio.create_task(dp.feed_raw_update(bot=bot, update=update))
-    except Exception:
-        pass
-    return {"ok": True}
+        # Get the raw body
+        body = await request.body()
+        # Process update using aiogram's webhook handler
+        await dp.feed_webhook_update(bot, await request.json(), secret_token=None)
+        return {"ok": True}
+    except Exception as e:
+        log.error("Error processing webhook: %s", e)
+        return {"ok": False, "error": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
@@ -144,4 +174,5 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", 8000)),
+        reload=True  # Remove in production
     )
