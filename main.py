@@ -32,7 +32,7 @@ GDRIVE_REGEX = re.compile(
 )
 GDRIVE_DIRECT = "https://drive.google.com/uc?export=download&id={}"
 
-app = FastAPI(title="MegaDownloader Bot", version="1.0.0")
+app = FastAPI(title="Downloader Bot", version="1.0.0")
 
 @app.get("/", response_class=PlainTextResponse)
 @app.get("/kaithhealthcheck", response_class=PlainTextResponse)
