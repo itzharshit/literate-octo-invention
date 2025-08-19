@@ -10,7 +10,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 
@@ -25,12 +25,11 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "524288"))
 if not BOT_TOKEN or not WEBHOOK_URL:
     raise RuntimeError("BOT_TOKEN and WEBHOOK_URL env vars are required!")
 
-# Initialize bot and dispatcher
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 GDRIVE_REGEX = re.compile(
-    r"https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)"
+    r"https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)/(?:[^?]*)(?:\?.*)?"
 )
 GDRIVE_DIRECT = "https://drive.google.com/uc?export=download&id={}"
 
@@ -65,7 +64,6 @@ async def download_file(url: str, dest_path: str, progress_cb=None) -> None:
                             last_update = now
                             last_percent = percent
 
-# ✅ Add /start command handler
 @dp.message(F.command("start"))
 async def cmd_start(message: Message):
     await message.answer(
@@ -73,7 +71,6 @@ async def cmd_start(message: Message):
         "Send me a Google Drive or direct download link and I'll forward it to you as a file."
     )
 
-# ✅ Handle links
 @dp.message(F.text.startswith("http"))
 async def handle_link(message: Message):
     url = message.text.strip()
@@ -81,6 +78,10 @@ async def handle_link(message: Message):
     if match:
         file_id = match.group(1)
         url = GDRIVE_DIRECT.format(file_id)
+    
+    if not url or not url.startswith("http"):
+        await message.reply("❌ Invalid link format. Please send a valid HTTP/HTTPS link.")
+        return
     
     safe_name = hashlib.md5(url.encode()).hexdigest()[:12]
     ext = mimetypes.guess_extension(
@@ -114,15 +115,20 @@ async def handle_link(message: Message):
             caption=f"✅ <b>Downloaded via:</b> <a href='{url}'>link</a>",
             reply_to_message_id=message.message_id,
         )
+    except TelegramBadRequest as e:
+        error_msg = str(e)
+        if "invalid file HTTP URL" in error_msg:
+            await progress_msg.edit_text("❌ Invalid file URL. The link may not point to a valid file.")
+        else:
+            await progress_msg.edit_text(f"❌ Telegram error: {error_msg}")
+    except Exception as e:
+        await progress_msg.edit_text(f"❌ Upload failed: {str(e)}")
     finally:
         try:
             os.remove(file_path)
         except OSError:
             pass
-        # Optionally keep the progress message or delete it
-        # await progress_msg.delete()
 
-# ✅ Fallback handler
 @dp.message()
 async def fallback(message: Message):
     await message.reply(
@@ -130,7 +136,6 @@ async def fallback(message: Message):
         "Or use /start to see the welcome message."
     )
 
-# Webhook setup
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 FULL_WEBHOOK_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
 
@@ -149,19 +154,13 @@ async def on_startup():
 async def on_shutdown():
     log.info("Shutting down bot...")
     await bot.delete_webhook()
-    # await bot.session.close()  # Usually not needed
 
-# Register startup/shutdown handlers
 app.add_event_handler("startup", on_startup)
 app.add_event_handler("shutdown", on_shutdown)
 
-# ✅ Fixed webhook handler - use aiogram's built-in webhook processing
 @app.post(WEBHOOK_PATH, include_in_schema=False)
 async def telegram_webhook(request: Request):
     try:
-        # Get the raw body
-        body = await request.body()
-        # Process update using aiogram's webhook handler
         await dp.feed_webhook_update(bot, await request.json(), secret_token=None)
         return {"ok": True}
     except Exception as e:
@@ -174,5 +173,4 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", 8000)),
-        reload=True  # Remove in production
     )
