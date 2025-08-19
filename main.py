@@ -4,16 +4,13 @@ import asyncio
 import logging
 import hashlib
 import mimetypes
-from typing import Tuple
-
 from aiohttp import ClientSession
 from aiofiles import open as aio_open
-
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramRetryAfter
-
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 
@@ -27,7 +24,7 @@ CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "524288"))
 if not BOT_TOKEN or not WEBHOOK_URL:
     raise RuntimeError("BOT_TOKEN and WEBHOOK_URL env vars are required!")
 
-bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 GDRIVE_REGEX = re.compile(
@@ -96,7 +93,7 @@ async def handle_link(message: Message):
         await bot.send_document(
             chat_id=message.chat.id,
             document=file_path,
-            caption=f"✅ Downloaded via: <a href='{url}'>link</a>",
+            caption=f"✅ <b>Downloaded via:</b> <a href='{url}'>link</a>",
             reply_to_message_id=message.message_id,
         )
     finally:
